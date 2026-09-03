@@ -1,0 +1,275 @@
+{
+  "name": "Inbound Enquiry Triage",
+  "nodes": [
+    {
+      "id": "trigger_imap",
+      "name": "Enquiry Received",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "format": "simple",
+        "downloadAttachments": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "set_config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "fromAddress", "type": "string", "value": "REPLACE_WITH_YOUR_SUPPORT_EMAIL@example.com" },
+            { "id": "2", "name": "reviewerEmail", "type": "string", "value": "REPLACE_WITH_REVIEWER_EMAIL@example.com" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "set_normalize",
+      "name": "Normalize Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "senderEmail", "type": "string", "value": "={{$json.from}}" },
+            { "id": "2", "name": "senderName", "type": "string", "value": "={{ $json.from.includes('<') ? $json.from.split('<')[0].replace(/\"/g,'').trim() : $json.from.split('@')[0] }}" },
+            { "id": "3", "name": "subject", "type": "string", "value": "={{$json.subject}}" },
+            { "id": "4", "name": "body", "type": "string", "value": "={{$json.text}}" },
+            { "id": "5", "name": "messageId", "type": "string", "value": "={{$json.messageId}}" },
+            { "id": "6", "name": "attachmentCount", "type": "string", "value": "={{ String(Object.keys($binary || {}).length) }}" },
+            { "id": "7", "name": "attachmentNames", "type": "string", "value": "={{ Object.keys($binary || {}).map(k => ($binary[k] && $binary[k].fileName) || k).join(', ') || 'None' }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "code_dedup",
+      "name": "Skip Duplicate Emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "const staticData = $getWorkflowStaticData('node');\nif (!staticData.processedIds) { staticData.processedIds = []; }\nconst output = [];\nfor (const item of $input.all()) {\n  const id = item.json.messageId;\n  if (id && staticData.processedIds.includes(id)) {\n    continue;\n  }\n  if (id) {\n    staticData.processedIds.push(id);\n    if (staticData.processedIds.length > 500) staticData.processedIds.shift();\n  }\n  output.push(item);\n}\nreturn output;"
+      }
+    },
+    {
+      "id": "lm_openai",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [880, 200],
+      "parameters": {
+        "model": { "__rl": true, "mode": "list", "value": "gpt-4o-mini", "cachedResultName": "gpt-4o-mini" },
+        "options": {}
+      }
+    },
+    {
+      "id": "info_extractor",
+      "name": "Classify & Draft Reply",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [880, 0],
+      "parameters": {
+        "text": "=Sender: {{$json.senderName}} ({{$json.senderEmail}})\nSubject: {{$json.subject}}\nAttachments: {{$json.attachmentNames}}\n\nMessage:\n{{$json.body}}",
+        "schemaType": "fromAttributes",
+        "attributes": {
+          "attributes": [
+            { "name": "intent", "type": "string", "description": "One of exactly: Sales, Support, Billing, Complaint, Other - the single best-fit category for this enquiry.", "required": true },
+            { "name": "draftReply", "type": "string", "description": "A warm, personalised reply that addresses the sender by name, directly responds to their specific enquiry, and matches a tone appropriate to the intent category. No subject line. Sign off as 'The Team'.", "required": true },
+            { "name": "requiresReview", "type": "boolean", "description": "true if this enquiry is a Complaint, a Billing dispute, legally or financially sensitive, ambiguous, or otherwise unsafe to auto-reply to without human review; false if it is a routine Sales or Support question safe to answer automatically.", "required": true }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "consolidate",
+      "name": "Consolidate Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1000, 0],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "intent", "type": "string", "value": "={{ $json.output ? $json.output.intent : $json.intent }}" },
+            { "id": "2", "name": "draftReply", "type": "string", "value": "={{ $json.output ? $json.output.draftReply : $json.draftReply }}" },
+            { "id": "3", "name": "requiresReview", "type": "boolean", "value": "={{ $json.output ? $json.output.requiresReview : $json.requiresReview }}" },
+            { "id": "4", "name": "senderEmail", "type": "string", "value": "={{$('Normalize Fields').item.json.senderEmail}}" },
+            { "id": "5", "name": "senderName", "type": "string", "value": "={{$('Normalize Fields').item.json.senderName}}" },
+            { "id": "6", "name": "subject", "type": "string", "value": "={{$('Normalize Fields').item.json.subject}}" },
+            { "id": "7", "name": "body", "type": "string", "value": "={{$('Normalize Fields').item.json.body}}" },
+            { "id": "8", "name": "attachmentNames", "type": "string", "value": "={{$('Normalize Fields').item.json.attachmentNames}}" },
+            { "id": "9", "name": "messageId", "type": "string", "value": "={{$('Normalize Fields').item.json.messageId}}" },
+            { "id": "10", "name": "fromAddress", "type": "string", "value": "={{$('Config').item.json.fromAddress}}" },
+            { "id": "11", "name": "reviewerEmail", "type": "string", "value": "={{$('Config').item.json.reviewerEmail}}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if_review",
+      "name": "Needs Human Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1220, 0],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            { "id": "cond1", "leftValue": "={{$json.requiresReview}}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }
+          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
+        }
+      }
+    },
+    {
+      "id": "send_notify_reviewer",
+      "name": "Notify Reviewer",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1440, -150],
+      "parameters": {
+        "resource": "email",
+        "operation": "send",
+        "fromEmail": "={{$json.fromAddress}}",
+        "toEmail": "={{$json.reviewerEmail}}",
+        "subject": "={{ '[Review Needed - ' + $json.intent + '] ' + $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ 'A new enquiry needs human review before replying.\\n\\nFrom: ' + $json.senderName + ' <' + $json.senderEmail + '>\\nSubject: ' + $json.subject + '\\nIntent: ' + $json.intent + '\\nAttachments: ' + $json.attachmentNames + '\\n\\nOriginal message:\\n' + $json.body + '\\n\\nAI-drafted reply (for your review, edit before sending):\\n' + $json.draftReply }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "set_prepare_row_escalate",
+      "name": "Prepare Row (Escalated)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1660, -150],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "Timestamp", "type": "string", "value": "={{$now}}" },
+            { "id": "2", "name": "Sender Email", "type": "string", "value": "={{$('Consolidate Fields').item.json.senderEmail}}" },
+            { "id": "3", "name": "Sender Name", "type": "string", "value": "={{$('Consolidate Fields').item.json.senderName}}" },
+            { "id": "4", "name": "Subject", "type": "string", "value": "={{$('Consolidate Fields').item.json.subject}}" },
+            { "id": "5", "name": "Intent", "type": "string", "value": "={{$('Consolidate Fields').item.json.intent}}" },
+            { "id": "6", "name": "Original Message", "type": "string", "value": "={{$('Consolidate Fields').item.json.body}}" },
+            { "id": "7", "name": "Drafted Reply", "type": "string", "value": "={{$('Consolidate Fields').item.json.draftReply}}" },
+            { "id": "8", "name": "Attachments", "type": "string", "value": "={{$('Consolidate Fields').item.json.attachmentNames}}" },
+            { "id": "9", "name": "Message ID", "type": "string", "value": "={{$('Consolidate Fields').item.json.messageId}}" },
+            { "id": "10", "name": "Status", "type": "string", "value": "Escalated - awaiting human review" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sheets_log_escalate",
+      "name": "Log to Sheet (Escalated)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1880, -150],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "id", "value": "REPLACE_WITH_SPREADSHEET_ID" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Enquiries" },
+        "columns": { "mappingMode": "autoMapInputData", "value": {}, "matchingColumns": [], "schema": [] },
+        "options": {}
+      }
+    },
+    {
+      "id": "send_reply",
+      "name": "Send Reply",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1440, 150],
+      "parameters": {
+        "resource": "email",
+        "operation": "send",
+        "fromEmail": "={{$json.fromAddress}}",
+        "toEmail": "={{$json.senderEmail}}",
+        "subject": "={{ 'Re: ' + $json.subject.replace(/^re:\\s*/i, '') }}",
+        "emailFormat": "text",
+        "text": "={{$json.draftReply}}",
+        "options": { "replyTo": "={{$json.fromAddress}}" }
+      }
+    },
+    {
+      "id": "set_prepare_row_autosend",
+      "name": "Prepare Row (Auto-sent)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1660, 150],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "Timestamp", "type": "string", "value": "={{$now}}" },
+            { "id": "2", "name": "Sender Email", "type": "string", "value": "={{$('Consolidate Fields').item.json.senderEmail}}" },
+            { "id": "3", "name": "Sender Name", "type": "string", "value": "={{$('Consolidate Fields').item.json.senderName}}" },
+            { "id": "4", "name": "Subject", "type": "string", "value": "={{$('Consolidate Fields').item.json.subject}}" },
+            { "id": "5", "name": "Intent", "type": "string", "value": "={{$('Consolidate Fields').item.json.intent}}" },
+            { "id": "6", "name": "Original Message", "type": "string", "value": "={{$('Consolidate Fields').item.json.body}}" },
+            { "id": "7", "name": "Drafted Reply", "type": "string", "value": "={{$('Consolidate Fields').item.json.draftReply}}" },
+            { "id": "8", "name": "Attachments", "type": "string", "value": "={{$('Consolidate Fields').item.json.attachmentNames}}" },
+            { "id": "9", "name": "Message ID", "type": "string", "value": "={{$('Consolidate Fields').item.json.messageId}}" },
+            { "id": "10", "name": "Status", "type": "string", "value": "Auto-sent" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sheets_log_autosend",
+      "name": "Log to Sheet (Auto-sent)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1880, 150],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "id", "value": "REPLACE_WITH_SPREADSHEET_ID" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Enquiries" },
+        "columns": { "mappingMode": "autoMapInputData", "value": {}, "matchingColumns": [], "schema": [] },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Enquiry Received": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Normalize Fields", "type": "main", "index": 0 }]] },
+    "Normalize Fields": { "main": [[{ "node": "Skip Duplicate Emails", "type": "main", "index": 0 }]] },
+    "Skip Duplicate Emails": { "main": [[{ "node": "Classify & Draft Reply", "type": "main", "index": 0 }]] },
+    "OpenAI Chat Model": { "ai_languageModel": [[{ "node": "Classify & Draft Reply", "type": "ai_languageModel", "index": 0 }]] },
+    "Classify & Draft Reply": { "main": [[{ "node": "Consolidate Fields", "type": "main", "index": 0 }]] },
+    "Consolidate Fields": { "main": [[{ "node": "Needs Human Review?", "type": "main", "index": 0 }]] },
+    "Needs Human Review?": { "main": [[{ "node": "Notify Reviewer", "type": "main", "index": 0 }], [{ "node": "Send Reply", "type": "main", "index": 0 }]] },
+    "Notify Reviewer": { "main": [[{ "node": "Prepare Row (Escalated)", "type": "main", "index": 0 }]] },
+    "Prepare Row (Escalated)": { "main": [[{ "node": "Log to Sheet (Escalated)", "type": "main", "index": 0 }]] },
+    "Send Reply": { "main": [[{ "node": "Prepare Row (Auto-sent)", "type": "main", "index": 0 }]] },
+    "Prepare Row (Auto-sent)": { "main": [[{ "node": "Log to Sheet (Auto-sent)", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
